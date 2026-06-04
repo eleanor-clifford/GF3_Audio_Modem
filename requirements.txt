@@ -1,5 +1,6 @@
 dvg-ringbuffer
 matplotlib
 numpy
+pyyaml
 scipy
 sounddevice
