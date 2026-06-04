@@ -1,0 +1,41 @@
+sample_rate: 48000
+
+payload:
+  - type: repetition
+    number: 10
+    payload:
+      - type: chirp
+        duration: 4096 # samples
+        frequencies: [20, 20000]
+
+  - type: silence
+    length: 2048
+
+  - type: repetition
+    number: 10
+    payload:
+      - type: golay_a
+        length: 4096
+
+      - type: silence
+        length: 2048
+
+      - type: golay_b
+        length: 4096
+
+      - type: silence
+        length: 2048
+
+  - type: repetition
+    number: 10
+    payload:
+      - type: known_symbol
+        bins: [1, 2047]
+        data: null
+
+  - type: repetition
+    number: null
+    - type: data_symbol
+      length: 4096
+      prefix: 2048
+      bins: [200, 2144]
