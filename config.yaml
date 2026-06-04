@@ -15,13 +15,15 @@ payload:
     number: 10
     payload:
       - type: golay_a
-        length: 4096
+        seed: [1, 1]
+        order: 12
 
       - type: silence
         length: 2048
 
       - type: golay_b
-        length: 4096
+        seed: [1, 1]
+        order: 12
 
       - type: silence
         length: 2048
@@ -30,12 +32,15 @@ payload:
     number: 10
     payload:
       - type: known_symbol
+        length: 4096
+        prefix: 2048
         bins: [1, 2047]
         data: null
 
   - type: repetition
     number: null
-    - type: data_symbol
-      length: 4096
-      prefix: 2048
-      bins: [200, 2144]
+    payload:
+      - type: data_symbol
+        length: 4096
+        prefix: 2048
+        bins: [200, 2144]
