@@ -1,10 +1,12 @@
 # vim: set ts=4 sw=4 tw=0 et :
 from config import (
     PLOTTING_ENABLED,
-    CHIRP,
     CONSTELLATION_BITS,
     CONSTELLATION_SYMBOLS,
-    KNOWN_OFDM_REPEAT_COUNT,
+    N_KNOWN_OFDM_FRAME_START,
+    N_KNOWN_OFDM_FRAME_END,
+    MAX_NUMBER_OF_SYMBOLS_IN_FRAME,
+    PAD_LAST_FRAME,
     OFDM_BODY_LENGTH,
     OFDM_CYCLIC_PREFIX_LENGTH,
     OFDM_DATA_INDEX_RANGE,
@@ -15,11 +17,8 @@ from config import (
     PEAK_SUPPRESSION_SEQUENCE,
     PEAK_SUPPRESSION_THRESH,
     SONG_ENABLED,
-    SONG_LEN,
-    SONG_NOTES,
-    SONG_VOLUME,
-    SONG,
-    get_index_of_frequency,
+    SONG_BLOCK,
+    NORMALISE_PER_SYMBOL,
 )
 from common import split_list_to_chunks_of_length
 
@@ -27,6 +26,7 @@ import numpy as np
 import scipy
 
 import random
+
 
 def map_to_constellation_symbols(data: bytes):
     constellation_symbols = []
@@ -77,7 +77,7 @@ def suppress_peaks(data: np.ndarray, plot=False):
 
         peak_thresh = thresh_std_devs * np.sqrt(improved_time_domain_block.var())
 
-        window_chunks = [] # chunks of the original signal with the peaks in them
+        window_chunks = []  # chunks of the original signal with the peaks in them
         for sample_idx, sample in enumerate(improved_time_domain_block):
             if abs(sample) > peak_thresh:
                 # expand a window if this sample is in one, else make a new window
@@ -85,17 +85,17 @@ def suppress_peaks(data: np.ndarray, plot=False):
                     if c_min <= sample_idx + SAMPLE_VIEW_RANGE \
                             and sample_idx - SAMPLE_VIEW_RANGE <= c_max:
                         window_chunks[i] = (
-                                max(abs(sample), peak),
-                                min(c_min, sample_idx - SAMPLE_VIEW_RANGE),
-                                max(c_max, sample_idx + SAMPLE_VIEW_RANGE)
-                            )
+                            max(abs(sample), peak),
+                            min(c_min, sample_idx - SAMPLE_VIEW_RANGE),
+                            max(c_max, sample_idx + SAMPLE_VIEW_RANGE)
+                        )
                         break
                 else:
                     window_chunks.append((
-                            abs(sample),
-                            sample_idx - SAMPLE_VIEW_RANGE,
-                            sample_idx + SAMPLE_VIEW_RANGE
-                        ))
+                        abs(sample),
+                        sample_idx - SAMPLE_VIEW_RANGE,
+                        sample_idx + SAMPLE_VIEW_RANGE
+                    ))
 
         if len(window_chunks) == 0:
             # can't believe this edge case actually happened
@@ -109,10 +109,10 @@ def suppress_peaks(data: np.ndarray, plot=False):
         if last_window_right - OFDM_BODY_LENGTH >= first_window_left:
             # if they overlap, combine them on the left
             window_chunks[0] = (
-                    max(first_window_peak, last_window_peak),
-                    last_window_left - OFDM_BODY_LENGTH,
-                    first_window_right
-                )
+                max(first_window_peak, last_window_peak),
+                last_window_left - OFDM_BODY_LENGTH,
+                first_window_right
+            )
             window_chunks.pop(-1)
 
         # suppress the biggest peaks first
@@ -121,10 +121,10 @@ def suppress_peaks(data: np.ndarray, plot=False):
         for _, c_min, c_max in window_chunks:
             shifted_impulses = []
             for s in range(
-                        c_min + (SAMPLE_VIEW_RANGE - IMPULSE_SHIFT_RANGE),
-                        c_max - (SAMPLE_VIEW_RANGE - IMPULSE_SHIFT_RANGE)
-                    ):
-                shifted_impulses.append(np.roll(PEAK_SUPPRESSION_IMPULSE_APPROXIMATOR, s - OFDM_BODY_LENGTH//2))
+                c_min + (SAMPLE_VIEW_RANGE - IMPULSE_SHIFT_RANGE),
+                c_max - (SAMPLE_VIEW_RANGE - IMPULSE_SHIFT_RANGE)
+            ):
+                shifted_impulses.append(np.roll(PEAK_SUPPRESSION_IMPULSE_APPROXIMATOR, s - OFDM_BODY_LENGTH // 2))
 
             # deal with the edge peak case
             if c_min < 0:
@@ -213,6 +213,14 @@ def modulate_bytes(data: bytes):
         len(constellation_symbols) // length_of_data_per_ofdm_block,
     )
 
+    if PAD_LAST_FRAME:
+        n_pad_blocks = MAX_NUMBER_OF_SYMBOLS_IN_FRAME - len(data_blocks) % MAX_NUMBER_OF_SYMBOLS_IN_FRAME
+        for _ in range(n_pad_blocks):
+            data_blocks.append(np.array([
+                random.choice(CONSTELLATION_SYMBOLS)
+                for _ in range(length_of_data_per_ofdm_block)
+            ]))
+
     avg_suppression = 0
     original_papr = []
     suppressed_papr = []
@@ -226,20 +234,20 @@ def modulate_bytes(data: bytes):
         # contain 0 (no information, value 0.) This all ensures that the
         # output of the OFDM modulator is a real (baseband) vector.
 
-
         if SONG_ENABLED:
             fun_block = np.zeros(OFDM_DATA_INDEX_RANGE["min"] - 1)
 
-            song_idx = 0
-            # TODO: choose based on frame
-            for note_len, notes in SONG:
-                if song_idx <= block_idx % SONG_LEN < song_idx + note_len:
-                    for note in notes:
-                        freq = SONG_NOTES[note]
-                        fun_block[get_index_of_frequency(freq)] += 1
-                song_idx += note_len
+            # account for known ofdm blocks
+            song_block_idx = (
+                (MAX_NUMBER_OF_SYMBOLS_IN_FRAME + N_KNOWN_OFDM_FRAME_START + N_KNOWN_OFDM_FRAME_END)
+                * (block_idx // MAX_NUMBER_OF_SYMBOLS_IN_FRAME)
+                + block_idx % MAX_NUMBER_OF_SYMBOLS_IN_FRAME
+                + N_KNOWN_OFDM_FRAME_START
+            )
 
-            fun_block *= SONG_VOLUME * np.max(np.abs(block))
+            fun_block = SONG_BLOCK(song_block_idx)
+            if NORMALISE_PER_SYMBOL:
+                fun_block *= np.max(np.abs(block))
         else:
             fun_block = np.random.choice(list(CONSTELLATION_SYMBOLS.values()), OFDM_DATA_INDEX_RANGE["min"] - 1)
 
@@ -248,7 +256,7 @@ def modulate_bytes(data: bytes):
         block_with_all_freqs = np.concatenate([
             fun_block,
             block,
-            np.random.choice(list(CONSTELLATION_SYMBOLS.values()), OFDM_BODY_LENGTH//2 - OFDM_DATA_INDEX_RANGE["max"])
+            np.random.choice(list(CONSTELLATION_SYMBOLS.values()), OFDM_BODY_LENGTH // 2 - OFDM_DATA_INDEX_RANGE["max"])
         ])
 
         full_block_with_all_freqs = np.concatenate(
@@ -262,11 +270,11 @@ def modulate_bytes(data: bytes):
         if PEAK_SUPPRESSION_STATS_ENABLED:
             original_peak = np.max(np.abs(time_domain_block_with_peaks))
             improved_peak = np.max(np.abs(improved_time_domain_block))
-            original_papr.append(original_peak**2/time_domain_block_with_peaks.var())
-            suppressed_papr.append(improved_peak**2/improved_time_domain_block.var())
-            suppression_prc = 100 - 100 * improved_peak/original_peak
+            original_papr.append(original_peak**2 / time_domain_block_with_peaks.var())
+            suppressed_papr.append(improved_peak**2 / improved_time_domain_block.var())
+            suppression_prc = 100 - 100 * improved_peak / original_peak
             avg_suppression += suppression_prc
-            print(f"[{block_idx+1}/{len(data_blocks)}] "
+            print(f"[{block_idx + 1}/{len(data_blocks)}] "
                   f"Peak suppression: {suppression_prc:.2f}%, "
                   f"PAPR: {original_papr[-1]:.2f} -> {suppressed_papr[-1]:.2f}")
 
@@ -296,13 +304,12 @@ def modulate_bytes(data: bytes):
             [improved_time_domain_block[-OFDM_CYCLIC_PREFIX_LENGTH:], improved_time_domain_block]
         )
 
-        normalized_block = block_with_cyclic_prefix.real / np.max(np.abs(block_with_cyclic_prefix.real))
+        if NORMALISE_PER_SYMBOL:
+            block_with_cyclic_prefix /= np.max(np.abs(block_with_cyclic_prefix.real))
 
         # Ensure imaginary component is zero
-        assert not block_with_cyclic_prefix.imag.any()
-
-
-        ofdm_symbols.append(normalized_block)
+        assert np.max(block_with_cyclic_prefix.imag) < 1e-10
+        ofdm_symbols.append(block_with_cyclic_prefix.real)
 
     if PEAK_SUPPRESSION_STATS_ENABLED:
         avg_suppression /= len(data_blocks)
@@ -314,7 +321,7 @@ def modulate_bytes(data: bytes):
             plt.plot(suppressed_papr, label="Suppressed")
             plt.title(r"Peak-to-Average Power Ratio, defined as $max(X^2)/Var(X)$")
             plt.axhline(PEAK_SUPPRESSION_THRESH**2, color='C2', linestyle='--')
-            plt.text(10, PEAK_SUPPRESSION_THRESH**2+0.5, "Peak detection threshold", color='C2')
+            plt.text(10, PEAK_SUPPRESSION_THRESH**2 + 0.5, "Peak detection threshold", color='C2')
             plt.xlabel("OFDM symbol index")
             plt.ylabel("PAPR")
             plt.legend()
@@ -328,7 +335,7 @@ def demodulate_signal(channel_coefficients_fft: np.ndarray, signal: np.ndarray, 
     ofdm_blocks = list(split_list_to_chunks_of_length(signal, OFDM_SYMBOL_LENGTH))
 
     output_llr = []
-    frame_offset_drift = drift_per_sample * KNOWN_OFDM_REPEAT_COUNT * OFDM_BODY_LENGTH
+    frame_offset_drift = drift_per_sample * (N_KNOWN_OFDM_FRAME_START * OFDM_BODY_LENGTH + OFDM_CYCLIC_PREFIX_LENGTH)
     total_drift_in_data_symbols = drift_per_sample * len(ofdm_blocks) * OFDM_SYMBOL_LENGTH
     drifts = np.linspace(frame_offset_drift, frame_offset_drift + total_drift_in_data_symbols, len(ofdm_blocks))
     for drift, block in zip(drifts, ofdm_blocks):

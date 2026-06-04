@@ -4,10 +4,15 @@ from config import (
     PLOTTING_ENABLED,
     OFDM_BODY_LENGTH,
     OFDM_SYMBOL_LENGTH,
+    OFDM_CYCLIC_PREFIX_LENGTH,
     PLOTTING_ENABLED,
     SAMPLE_RATE,
     MAX_RECORDING_DURATION,
-    RECORDING_OUTPUT_DIR
+    RECORDING_OUTPUT_DIR,
+    N_KNOWN_OFDM_FRAME_START,
+    N_KNOWN_OFDM_FRAME_END,
+    NEXT_KNOWN_OFDM_BLOCK,
+    MAX_NUMBER_OF_SYMBOLS_IN_FRAME,
 )
 from common import (
     save_data_to_file,
@@ -18,13 +23,15 @@ from error_stats import bit_error, plot_cumulative_error
 from metadata import decode_received_file
 from synchronization_estimation import (
     crop_frame_into_parts,
-    crop_signal_into_overlapping_frames,
+    # crop_signal_into_overlapping_frames,
+    synchronise_crop,
     estimate_channel_coefficients_and_variance,
 )
 from ldpc_tools import decode_from_llr
 
 
 import numpy as np
+from scipy.io import wavfile
 import sounddevice as sd
 from dvg_ringbuffer import RingBuffer
 
@@ -37,35 +44,23 @@ if PLOTTING_ENABLED:
 
 
 def receive_signal(signal):
-    signal_frames = crop_signal_into_overlapping_frames(signal)
 
-    llr_for_each_bit = []
-    for (frame_idx, frame) in enumerate(signal_frames):
-        drift_gap, drift_per_sample, chirp_start, prefix, data, endfix, chirp_end = crop_frame_into_parts(frame, plot=(frame_idx == 0))
+    # signal_frames = crop_signal_into_overlapping_frames(signal)
+    symbols = synchronise_crop(signal)
 
-        # the endfix start index is already somewhat by `crop_frame_into_parts`
-        uncorrected_drift_to_endfix = (len(prefix) + len(data)) * drift_per_sample
-        drift_to_endfix = uncorrected_drift_to_endfix - drift_gap
+    assert N_KNOWN_OFDM_FRAME_START == 1
+    assert N_KNOWN_OFDM_FRAME_END == 0
 
-        channel_coefficients_start, normalized_variance_start = estimate_channel_coefficients_and_variance(prefix, 0, drift_per_sample, plot=(frame_idx == 0))
-        channel_coefficients_end, normalized_variance_end = estimate_channel_coefficients_and_variance(endfix, drift_to_endfix, drift_per_sample, plot=(frame_idx == 0))
+    received_known_symbols = symbols[range(0, len(symbols), MAX_NUMBER_OF_SYMBOLS_IN_FRAME + 1)]
+    data_symbols = symbols[np.arange(0, len(symbols)) % (MAX_NUMBER_OF_SYMBOLS_IN_FRAME + 1) != 0]
+    assert len(data_symbols) + len(received_known_symbols) == len(symbols)
 
-        # TODO: choose
-        channel_coefficients = (channel_coefficients_start + channel_coefficients_end) / 2
+    known_blocks = np.array([NEXT_KNOWN_OFDM_BLOCK(-1) for _ in range(len(received_known_symbols))])
 
-        if PLOTTING_ENABLED and frame_idx == 0:
-            plt.figure(69)
-            plt.plot(range(64, 128), np.fft.ifft(channel_coefficients, OFDM_BODY_LENGTH).real[64:128], label="Averaged impulse response")
-            plt.xlabel("Sample")
-            plt.ylabel("Magnitude")
-            plt.xticks(range(64, 128+1, 16))
-            plt.title("Drift-corrected impulse responses of known OFDM blocks")
-            plt.legend()
-            plt.savefig("plots/impulse_response.pgf")
-            plt.savefig("plots/impulse_response.pdf")
+    received_known_blocks = received_known_symbols[:, OFDM_CYCLIC_PREFIX_LENGTH:]
+    channel_coefficients, normalised_variance = estimate_channel_coefficients_and_variance(received_known_blocks, known_blocks, 0, 0, False)
 
-        llr_for_each_bit.extend(demodulate_signal(channel_coefficients, data, normalized_variance_start, drift_per_sample))
-
+    llr_for_each_bit = demodulate_signal(channel_coefficients, np.concatenate(data_symbols), normalised_variance, 0)
     decoded_bytes = decode_from_llr(np.array(llr_for_each_bit))
     return decode_received_file(decoded_bytes)
 
@@ -89,10 +84,14 @@ if __name__ == "__main__":
     parser = ArgumentParser(description="OFDM receiver")
     parser.add_argument("file", nargs="?", help="Numpy waveform file")
     parser.add_argument("--expected_output", help="Expected transmission")
+    parser.add_argument("--wav", action="store_true")
     args = finalize_argparse_for_sounddevice(parser)
 
     if args.file is not None:
-        recorded_signal = np.load(args.file)
+        if args.wav:
+            _, recorded_signal = wavfile.read(args.file)
+        else:
+            recorded_signal = np.load(args.file)
     else:
         set_audio_device_or_warn(args)
         recorded_signal = record_until_enter_key()

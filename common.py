@@ -13,11 +13,11 @@ def split_list_to_chunks_of_length(list, length):
         index += length
 
 
-def save_data_to_file(location: Path, signal: np.ndarray):
+def save_data_to_file(location: Path, signal: np.ndarray, filename=None):
     if not location.exists():
         location.mkdir(parents=True)
 
-    file_location = location / f"{uuid.uuid4().hex[:5]}.npy"
+    file_location = location / (filename or f"{uuid.uuid4().hex[:5]}.npy")
     np.save(file_location, signal)
 
     print(f"[INFO] Signal saved to:  {file_location}")
